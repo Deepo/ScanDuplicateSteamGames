@@ -7,6 +7,7 @@
 # Parse command line arguments
 DELETE_MODE=false
 SHOW_SIZES=true
+DRY_RUN=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         -delete)
@@ -15,6 +16,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -no-sizes)
             SHOW_SIZES=false
+            shift
+            ;;
+        -dry-run)
+            DRY_RUN=true
             shift
             ;;
         -help|--help|-h)
@@ -26,6 +31,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  -delete     Interactive mode to delete duplicate folders"
             echo "  -no-sizes   Skip size calculation for faster scanning"
+            echo "  -dry-run    Show what would be deleted without actually deleting"
             echo "  -help       Show this help message"
             echo ""
             echo "Examples:"
@@ -33,12 +39,16 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 -no-sizes          # Fast scan without size calculation"
             echo "  $0 -delete            # Interactive deletion mode"
             echo "  $0 -delete -no-sizes  # Interactive deletion with fast scanning"
+            echo "  $0 -dry-run           # Show what would be deleted"
             echo ""
             echo "Description:"
             echo "  This script scans for duplicate game installations across multiple"
             echo "  Steam Library locations including external storage devices and"
             echo "  internal storage. It helps identify and optionally remove duplicate"
             echo "  game installations to save storage space."
+            echo ""
+            echo "Note: When deleting games, both the game folder and the corresponding"
+            echo "      Steam .acf file will be removed to maintain Steam library consistency."
             exit 0
             ;;
         *)
@@ -47,6 +57,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo "  -delete: Interactive mode to delete duplicate folders"
             echo "  -no-sizes: Skip size calculation for faster scanning"
+            echo "  -dry-run: Show what would be deleted without actually deleting"
             echo "  -help: Show help message"
             echo ""
             echo "Run '$0 -help' for more information."
@@ -54,6 +65,75 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Function to find the corresponding .acf file for a game
+find_acf_file() {
+    local game_folder="$1"
+    local steamapps_dir="$2"
+    
+    # Look for .acf files in the steamapps directory
+    for acf_file in "$steamapps_dir"/*.acf; do
+        if [ -f "$acf_file" ]; then
+            # Extract the installdir value from the .acf file
+            local installdir=$(grep -o '"installdir"[[:space:]]*"[^"]*"' "$acf_file" | cut -d'"' -f4)
+            
+            # Check if the installdir matches our game folder name
+            if [ "$installdir" = "$game_folder" ]; then
+                echo "$acf_file"
+                return 0
+            fi
+        fi
+    done
+    
+    return 1
+}
+
+# Function to safely delete a game and its .acf file
+delete_game_and_acf() {
+    local game_path="$1"
+    local game_name="$2"
+    local location_name="$3"
+    
+    # Get the steamapps directory (parent of 'common')
+    local steamapps_dir=$(dirname "$(dirname "$game_path")")
+    local acf_file=""
+    
+    # Find the corresponding .acf file
+    acf_file=$(find_acf_file "$game_name" "$steamapps_dir")
+    
+    if [ "$DRY_RUN" = true ]; then
+        echo "  [DRY RUN] Would delete:"
+        echo "    - Game folder: $game_path"
+        if [ -n "$acf_file" ]; then
+            echo "    - Steam .acf file: $acf_file"
+        else
+            echo "    - Steam .acf file: NOT FOUND (manual cleanup may be needed)"
+        fi
+    else
+        echo "  Deleting game folder: $game_path"
+        if rm -rf "$game_path"; then
+            echo "    ✓ Game folder deleted successfully"
+        else
+            echo "    ✗ Failed to delete game folder"
+            return 1
+        fi
+        
+        if [ -n "$acf_file" ]; then
+            echo "  Deleting Steam .acf file: $acf_file"
+            if rm -f "$acf_file"; then
+                echo "    ✓ Steam .acf file deleted successfully"
+            else
+                echo "    ✗ Failed to delete Steam .acf file"
+                return 1
+            fi
+        else
+            echo "  ⚠ Warning: No corresponding .acf file found for '$game_name'"
+            echo "    You may need to manually remove this game from Steam library"
+        fi
+    fi
+    
+    return 0
+}
 
 echo "Scanning for duplicate game installations across disks and internal storage..."
 echo "=========================================================================="
@@ -197,6 +277,22 @@ for game_name in "${!game_locations[@]}"; do
         
         found_duplicates=true
         
+        # Handle dry-run mode
+        if [ "$DRY_RUN" = true ]; then
+            echo ""
+            echo "  [DRY RUN] Would delete the following files:"
+            for i in "${!location_array[@]}"; do
+                echo "    - ${location_array[$i]}: ${path_array[$i]}"
+                acf_file=$(find_acf_file "$game_name" "$(dirname "$(dirname "${path_array[$i]}")")")
+                if [ -n "$acf_file" ]; then
+                    echo "      + Steam .acf file: $acf_file"
+                else
+                    echo "      + Steam .acf file: NOT FOUND"
+                fi
+            done
+            echo ""
+        fi
+        
         # Handle interactive deletion if enabled
         if [ "$DELETE_MODE" = true ]; then
             # Create working copies of arrays for this game
@@ -227,7 +323,7 @@ for game_name in "${!game_locations[@]}"; do
                         selected_location="${current_locations[$selected_index]}"
                         
                         echo "Deleting '$game_name' from $selected_location..."
-                        if rm -rf "$selected_path"; then
+                        if delete_game_and_acf "$selected_path" "$game_name" "$selected_location"; then
                             echo "Successfully deleted '$game_name' from $selected_location"
                             
                             # Remove the deleted location from arrays
